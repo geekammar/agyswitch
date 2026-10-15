@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""AGY Switch (ags) - Multi-account manager for Google Antigravity CLI."""
+
+import sys
+import os
+
+# Add src to sys.path
+repo_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(repo_root, "src"))
+
+from ags.cli import main
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,42 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Local environments and virtualenvs
+.venv/
+env/
+venv/
+ENV/
+
+# Credentials, secrets, and auth tokens (CRITICAL)
+*token*
+*oauth*
+*credential*
+*.secret
+*.key
+*.pem
+antigravity-oauth-token
+
+# Runtime state, databases, and logs
+*.db
+*.db-shm
+*.db-wal
+*.log
+cli-*.log
+history.jsonl
+presence/
+
+# Local AGY switch state & test sandboxes
+registry.json
+profiles/
+workspaces/
+scratch/
+tmp/
+.test_tmp/
