@@ -29,20 +29,31 @@ def cmd_list(args, registry: ProfileRegistry):
         print("No profiles configured yet. Add one using: ags add <alias>")
         return 0
 
-    print(f"{'ALIAS':<18} {'PROFILE ID':<20} {'STATUS':<20} {'LAST USED':<20} {'CREATED':<20}")
-    print("-" * 98)
+    print(f"{'ALIAS':<16} {'PROFILE ID':<20} {'ACCOUNT / STATUS':<30} {'LAST USED':<18} {'CREATED':<18}")
+    print("-" * 104)
+    warnings = []
     for p in profiles:
-        status = registry.get_auth_status(p)
+        account = registry.get_auth_account(p)
+        warning = registry.check_eligibility_warning(p)
+        status_display = account
+        if warning:
+            status_display += " [!]"
+            warnings.append((p.alias, warning))
         last_used = p.last_used_at[:16].replace("T", " ") if p.last_used_at else "Never"
         created = p.created_at[:16].replace("T", " ")
-        print(f"{p.alias:<18} {p.id:<20} {status:<20} {last_used:<20} {created:<20}")
+        print(f"{p.alias:<16} {p.id:<20} {status_display:<30} {last_used:<18} {created:<18}")
+
+    if warnings:
+        print("\nAccount Notices:")
+        for alias, warn in warnings:
+            print(f"  [!] {alias}: {warn}")
     return 0
 
 
 def cmd_add(args, registry: ProfileRegistry):
     try:
         profile = registry.add_profile(args.alias)
-        status = registry.get_auth_status(profile)
+        status = registry.get_auth_account(profile)
         print(f"Profile '{profile.alias}' successfully added.")
         print(f"  Profile ID: {profile.id}")
         print(f"  Home Path:  {profile.home_dir}")
@@ -106,6 +117,19 @@ def cmd_run(args, registry: ProfileRegistry):
     if not profile:
         print(f"Error: Profile '{args.alias}' not found.", file=sys.stderr)
         return 1
+
+    # Check for active running sessions
+    active_pids = registry.get_active_sessions(profile)
+    if active_pids:
+        print(
+            f"Notice: Profile '{profile.alias}' currently has active session(s) (PID: {', '.join(map(str, active_pids))}).",
+            file=sys.stderr
+        )
+
+    # Check for known Google backend eligibility warning
+    warning = registry.check_eligibility_warning(profile)
+    if warning:
+        print(f"Notice: {warning}", file=sys.stderr)
 
     registry.touch_last_used(profile.alias)
     runner = IsolationRunner(agy_binary=args.binary)

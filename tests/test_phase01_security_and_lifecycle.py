@@ -216,6 +216,40 @@ class TestPhase01SecurityAndLifecycle(unittest.TestCase):
         fresh = ProfileRegistry(base_dir=self.test_dir)
         self.assertIsNone(fresh.get_by_alias("cli-renamed"))
 
+    def test_09_oidc_email_discovery(self):
+        """Verify get_auth_account extracts Google email from non-secret id_token payload."""
+        import base64
+        prof = self.registry.add_profile("email-test")
+        token_dir = os.path.join(prof.home_dir, ".gemini", "antigravity-cli")
+        os.makedirs(token_dir, mode=0o700, exist_ok=True)
+
+        # Create mock JWT with non-secret payload
+        payload = json.dumps({"email": "dev.user@gmail.com", "sub": "123456"}).encode("utf-8")
+        payload_b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        mock_jwt = f"header.{payload_b64}.signature"
+
+        token_file = os.path.join(token_dir, "antigravity-oauth-token")
+        with open(token_file, "w") as f:
+            json.dump({"token": "secret_access_token", "id_token": mock_jwt}, f)
+
+        account = self.registry.get_auth_account(prof)
+        self.assertEqual(account, "dev.user@gmail.com")
+
+    def test_10_eligibility_warning_detection(self):
+        """Verify check_eligibility_warning detects VALIDATION_REQUIRED in recent session logs."""
+        prof = self.registry.add_profile("warning-test")
+        log_dir = os.path.join(prof.home_dir, ".gemini", "antigravity-cli", "log")
+        os.makedirs(log_dir, mode=0o700, exist_ok=True)
+
+        mock_log = os.path.join(log_dir, "cli-20261015_120000.log")
+        with open(mock_log, "w") as f:
+            f.write("Some prefix log line\nPERMISSION_DENIED (code 403): VALIDATION_REQUIRED\nEligibility check failed\n")
+
+        warning = self.registry.check_eligibility_warning(prof)
+        self.assertIsNotNone(warning)
+        self.assertIn("Google backend verification required", warning)
+
 
 if __name__ == "__main__":
     unittest.main()
+

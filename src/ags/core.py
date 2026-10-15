@@ -4,6 +4,7 @@ import os
 import re
 import json
 import uuid
+import base64
 import tempfile
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -273,6 +274,70 @@ class ProfileRegistry:
             except OSError:
                 pass
         return "Not Authenticated"
+
+    def get_auth_account(self, profile: Profile) -> str:
+        """
+        Safely check if the profile is authenticated and extract the bound Google account email.
+        Decodes ONLY the public OIDC id_token payload without touching or exposing secret tokens.
+        Never prints or exposes access tokens or refresh tokens.
+        """
+        token_path = os.path.join(profile.home_dir, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+        if not os.path.isfile(token_path):
+            return "Not Authenticated"
+
+        try:
+            st = os.stat(token_path)
+            mode = oct(st.st_mode)[-3:]
+            if mode != "600":
+                os.chmod(token_path, 0o600)
+            if st.st_size == 0:
+                return "Not Authenticated"
+
+            with open(token_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            id_token = data.get("id_token")
+            if id_token and isinstance(id_token, str):
+                parts = id_token.split(".")
+                if len(parts) >= 2:
+                    payload_b64 = parts[1]
+                    payload_b64 += "=" * (-len(payload_b64) % 4)
+                    payload_bytes = base64.urlsafe_b64decode(payload_b64.encode("ascii"))
+                    payload = json.loads(payload_bytes.decode("utf-8"))
+                    email = payload.get("email")
+                    if email and isinstance(email, str):
+                        return email
+            return "Authenticated"
+        except Exception:
+            return "Authenticated"
+
+    def check_eligibility_warning(self, profile: Profile) -> Optional[str]:
+        """
+        Inspect recent session logs for known Google backend eligibility issues
+        such as upstream issue #785 (VALIDATION_REQUIRED).
+        Does NOT read or expose tokens.
+        """
+        log_dir = os.path.join(profile.home_dir, ".gemini", "antigravity-cli", "log")
+        if not os.path.isdir(log_dir):
+            return None
+
+        try:
+            log_files = sorted(
+                [os.path.join(log_dir, f) for f in os.listdir(log_dir) if f.startswith("cli-") and f.endswith(".log")],
+                key=os.path.getmtime,
+                reverse=True
+            )
+            if not log_files:
+                return None
+
+            latest_log = log_files[0]
+            with open(latest_log, "r", encoding="utf-8", errors="ignore") as f:
+                tail_content = f.read()[-8192:]
+                if "VALIDATION_REQUIRED" in tail_content or "Eligibility check failed" in tail_content:
+                    return "Google backend verification required (Upstream Issue #785)"
+        except Exception:
+            pass
+        return None
 
     def get_active_sessions(self, profile: Profile) -> List[int]:
         """Check /proc to find any processes running with HOME set to profile's home directory."""
