@@ -2,8 +2,11 @@
 
 import os
 import sys
+import shutil
 import argparse
+import subprocess
 from typing import List, Optional
+from . import __version__
 from .core import (
     ProfileRegistry,
     InvalidAliasError,
@@ -23,10 +26,38 @@ def get_registry(base_dir: Optional[str] = None) -> ProfileRegistry:
     return ProfileRegistry(base_dir=target_dir)
 
 
+def cmd_version(args, registry: ProfileRegistry):
+    print(f"AGY Switch (ags) v{__version__}")
+    return 0
+
+
 def cmd_list(args, registry: ProfileRegistry):
     profiles = registry.list_profiles()
     if not profiles:
         print("No profiles configured yet. Add one using: ags add <alias>")
+        return 0
+
+    cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+    compact = getattr(args, "compact", False) or cols < 80
+
+    if compact:
+        print("Available Profiles:")
+        print("-" * min(cols, 60))
+        for p in profiles:
+            summary = registry.get_auth_summary(p)
+            account = summary["account"] or "(none)"
+            status_display = summary["status"]
+            last_used = p.last_used_at[:16].replace("T", " ") if p.last_used_at else "Never"
+            latest_conv = registry.get_latest_conversation(p)
+            print(f"• {p.alias}")
+            print(f"    Account:   {account}")
+            print(f"    Status:    {status_display}")
+            if latest_conv:
+                print(f"    Latest:    \"{latest_conv['title']}\"")
+            if summary.get("eligibility_warning"):
+                print(f"    Notice:    {summary['eligibility_warning']}")
+            print(f"    Last Used: {last_used}")
+            print()
         return 0
 
     print(f"{'ALIAS':<16} {'PROFILE ID':<20} {'ACCOUNT':<28} {'AUTH STATUS':<26} {'LAST USED':<18}")
@@ -179,11 +210,37 @@ def cmd_menu(args, registry: ProfileRegistry):
     return 0
 
 
+def cmd_update(args, registry: ProfileRegistry):
+    repo_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    git_dir = os.path.join(repo_dir, ".git")
+    if not os.path.isdir(git_dir):
+        print(f"AGY Switch is installed at: {repo_dir}")
+        print("No .git repository found in installation directory. Cannot run git update.")
+        print("To update, please re-clone or run the installer script.")
+        return 1
+
+    print(f"Updating AGY Switch from Git repository ({repo_dir})...")
+    print(f"Your profile data and authentication tokens in '{args.base_dir}' will NOT be affected.\n")
+    try:
+        res = subprocess.run(["git", "pull", "--ff-only"], cwd=repo_dir, capture_output=True, text=True)
+        print(res.stdout.strip())
+        if res.returncode != 0:
+            if res.stderr:
+                print(res.stderr.strip(), file=sys.stderr)
+            return res.returncode
+        print("\nUpdate complete. All profiles, credentials, and conversation histories are preserved.")
+        return 0
+    except Exception as e:
+        print(f"Failed to execute git update: {e}", file=sys.stderr)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ags",
         description="AGY Switch - Multi-account manager for Google Antigravity CLI"
     )
+    parser.add_argument("-v", "--version", action="version", version=f"AGY Switch (ags) v{__version__}")
     parser.add_argument("--base-dir", default=DEFAULT_BASE_DIR, help="Base directory for AGY Switch profiles")
     parser.add_argument("--binary", default=None, help="Path to agy executable")
 
@@ -194,7 +251,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("alias", help="Profile alias (e.g. personal, work)")
 
     # list
-    subparsers.add_parser("list", aliases=["ls"], help="List configured profiles")
+    p_list = subparsers.add_parser("list", aliases=["ls"], help="List configured profiles")
+    p_list.add_argument("--compact", action="store_true", help="Display in compact format (auto on narrow screens)")
 
     # rename
     p_rename = subparsers.add_parser("rename", aliases=["mv"], help="Rename a profile alias")
@@ -218,6 +276,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # menu
     subparsers.add_parser("menu", help="Launch interactive numbered terminal menu")
+
+    # version
+    subparsers.add_parser("version", help="Show AGY Switch version")
+
+    # update
+    subparsers.add_parser("update", help="Update AGY Switch application code")
 
     return parser
 
@@ -252,6 +316,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "rm": cmd_remove,
         "run": cmd_run,
         "menu": cmd_menu,
+        "version": cmd_version,
+        "update": cmd_update,
     }
 
     handler = handlers.get(args.command)

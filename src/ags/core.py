@@ -479,3 +479,42 @@ class ProfileRegistry:
             self.save()
         return profile
 
+    def get_latest_conversation(self, profile: Profile) -> Optional[dict]:
+        """
+        Safely inspect the profile's SQLite conversation database to retrieve
+        metadata for the latest conversation.
+        Read-only query: does NOT modify or delete conversation records.
+        """
+        db_path = os.path.join(profile.home_dir, ".gemini", "antigravity-cli", "conversation_summaries.db")
+        if not os.path.isfile(db_path):
+            return None
+        conn = None
+        try:
+            import sqlite3
+            uri = f"file:{os.path.abspath(db_path)}?mode=ro"
+            try:
+                conn = sqlite3.connect(uri, uri=True, timeout=1.0)
+            except Exception:
+                conn = sqlite3.connect(db_path, timeout=1.0)
+            row = conn.execute(
+                "SELECT conversation_id, title, last_modified_time FROM conversation_summaries "
+                "ORDER BY last_modified_time DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                return {
+                    "conversation_id": str(row[0]),
+                    "title": str(row[1]) if row[1] else "(untitled)",
+                    "last_modified_time": str(row[2])
+                }
+        except Exception:
+            pass
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        return None
+
+
+

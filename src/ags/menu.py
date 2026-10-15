@@ -4,7 +4,7 @@ Avoids fragile curses libraries to ensure reliable rendering over high-latency c
 """
 
 import sys
-from typing import Optional
+from typing import Optional, List
 from .core import ProfileRegistry, Profile, InvalidAliasError, ProfileAlreadyExistsError, ProfileNotFoundError
 from .isolation import IsolationRunner
 
@@ -27,19 +27,28 @@ class TerminalMenu:
             if not profiles:
                 print(" No profiles configured yet.\n")
             else:
-                print(" Available Profiles:")
+                print(" Available Profiles:\n")
                 for idx, p in enumerate(profiles, start=1):
                     last_used = p.last_used_at[:16].replace("T", " ") if p.last_used_at else "Never"
                     summary = self.registry.get_auth_summary(p)
                     acct = summary["account"] or "(none)"
                     status = summary["status"]
-                    print(f"  [{idx:2d}] {p.alias:<16} (ID: {p.id}, Account: {acct}, Status: {status}, Last used: {last_used})")
-                print()
+                    latest_conv = self.registry.get_latest_conversation(p)
+
+                    print(f"  [{idx}] {p.alias}")
+                    print(f"      Google Account: {acct}")
+                    print(f"      Status:         {status}")
+                    if latest_conv:
+                        print(f"      Latest Chat:    \"{latest_conv['title']}\"")
+                    if summary.get("eligibility_warning"):
+                        print(f"      Notice:         {summary['eligibility_warning']}")
+                    print(f"      Last Used:      {last_used}")
+                    print()
 
             print(" Actions:")
             if profiles:
-                print("  [1..N] Launch profile by number")
-                print("  [c]    Launch profile with --continue (-c)")
+                print("  [1..N] Launch profile (new session)")
+                print("  [c]    Resume previous conversation (-c)")
             print("  [a]    Add a new profile")
             if profiles:
                 print("  [m]    Rename an existing profile")
@@ -48,9 +57,9 @@ class TerminalMenu:
             print("-" * 50)
 
             try:
-                choice = input("Enter choice > ").strip().lower()
+                choice = input("Enter choice (or <num>c to resume) > ").strip().lower()
             except (EOFError, KeyboardInterrupt):
-                print("\nExiting.")
+                print("\nGoodbye.")
                 break
 
             if choice in ("q", "quit", "exit"):
@@ -64,6 +73,22 @@ class TerminalMenu:
                 self._action_remove(profiles)
             elif choice in ("c", "continue"):
                 self._action_launch_continue(profiles)
+            elif choice.endswith("c") and choice[:-1].isdigit():
+                # Quick resume shortcut: e.g. "1c" -> launch profile 1 with -c
+                num = int(choice[:-1])
+                if 1 <= num <= len(profiles):
+                    target = profiles[num - 1]
+                    self._launch_profile(target, extra_args=["-c"])
+                else:
+                    print(f"Invalid profile number: {num}. Choose between 1 and {len(profiles)}.")
+            elif choice.startswith("c") and choice[1:].isdigit():
+                # Quick resume shortcut: e.g. "c1" -> launch profile 1 with -c
+                num = int(choice[1:])
+                if 1 <= num <= len(profiles):
+                    target = profiles[num - 1]
+                    self._launch_profile(target, extra_args=["-c"])
+                else:
+                    print(f"Invalid profile number: {num}. Choose between 1 and {len(profiles)}.")
             elif choice.isdigit():
                 num = int(choice)
                 if 1 <= num <= len(profiles):
@@ -82,7 +107,7 @@ class TerminalMenu:
                 return
             prof = self.registry.add_profile(alias)
             print(f"Successfully added profile '{prof.alias}' (ID: {prof.id}).")
-            
+
             # Ask if user wants to log in now
             auth_now = input("Run authentication for this profile now? [y/N]: ").strip().lower()
             if auth_now in ("y", "yes"):
@@ -92,7 +117,7 @@ class TerminalMenu:
         except (EOFError, KeyboardInterrupt):
             print("\nCancelled.")
 
-    def _action_rename(self, profiles):
+    def _action_rename(self, profiles: List[Profile]):
         if not profiles:
             return
         try:
@@ -104,12 +129,12 @@ class TerminalMenu:
                 else:
                     print("Invalid profile number.")
                     return
-            
+
             new_alias = input(f"Enter new alias for '{old_alias}': ").strip()
             if not new_alias:
                 print("Operation cancelled.")
                 return
-            
+
             updated = self.registry.rename_profile(old_alias, new_alias)
             print(f"Successfully renamed profile to '{updated.alias}'. All credentials and history preserved.")
         except (ProfileNotFoundError, InvalidAliasError, ProfileAlreadyExistsError) as e:
@@ -117,7 +142,7 @@ class TerminalMenu:
         except (EOFError, KeyboardInterrupt):
             print("\nCancelled.")
 
-    def _action_remove(self, profiles):
+    def _action_remove(self, profiles: List[Profile]):
         if not profiles:
             return
         try:
@@ -129,7 +154,7 @@ class TerminalMenu:
                 else:
                     print("Invalid profile number.")
                     return
-            
+
             confirm = input(f"Are you sure you want to remove profile '{target}'? [y/N]: ").strip().lower()
             if confirm in ("y", "yes"):
                 removed = self.registry.remove_profile(target)
@@ -141,12 +166,25 @@ class TerminalMenu:
         except (EOFError, KeyboardInterrupt):
             print("\nCancelled.")
 
-    def _action_launch_continue(self, profiles):
+    def _action_launch_continue(self, profiles: List[Profile]):
         if not profiles:
             return
         try:
-            target = input("Enter profile number or alias to continue (-c): ").strip()
-            if target.isdigit():
+            # Pick sensible default: profile with most recent last_used_at, or 1st profile
+            default_idx = 1
+            latest_ts = ""
+            for idx, p in enumerate(profiles, start=1):
+                if p.last_used_at and p.last_used_at > latest_ts:
+                    latest_ts = p.last_used_at
+                    default_idx = idx
+
+            default_prof = profiles[default_idx - 1]
+            prompt = f"Enter profile number or alias to resume [-c] (default: {default_idx} [{default_prof.alias}]): "
+            target = input(prompt).strip()
+
+            if not target:
+                prof = default_prof
+            elif target.isdigit():
                 idx = int(target)
                 if 1 <= idx <= len(profiles):
                     prof = profiles[idx - 1]
@@ -164,20 +202,46 @@ class TerminalMenu:
             print("\nCancelled.")
 
     def _launch_profile(self, profile: Profile, extra_args: list):
+        # 1. Check for active concurrent sessions
         active_pids = self.registry.get_active_sessions(profile)
         if active_pids:
             pid_list = ", ".join(map(str, active_pids))
             print(f"\nWarning: Profile '{profile.alias}' already has active session(s) (PID: {pid_list}).")
             print("Running concurrent sessions on the same profile risks database lock contention.")
-            confirm = input("Proceed anyway? [y/N]: ").strip().lower()
-            if confirm not in ("y", "yes"):
-                print("Cancelled.")
+            try:
+                confirm = input("Proceed anyway? [y/N]: ").strip().lower()
+                if confirm not in ("y", "yes"):
+                    print("Cancelled.")
+                    return
+            except (EOFError, KeyboardInterrupt):
+                print("\nCancelled.")
                 return
 
-        print(f"\nLaunching profile '{profile.alias}'...")
+        # 2. Check for known Google backend eligibility warnings
+        summary = self.registry.get_auth_summary(profile)
+        if summary.get("eligibility_warning"):
+            print(f"\n[!] Account Notice for '{profile.alias}':")
+            print(f"    {summary['eligibility_warning']}")
+            print("    Google backend will reject prompt generation until account verification is restored.")
+            try:
+                confirm = input("Proceed with launching this profile anyway? [y/N]: ").strip().lower()
+                if confirm not in ("y", "yes"):
+                    print("Launch cancelled.")
+                    return
+            except (EOFError, KeyboardInterrupt):
+                print("\nCancelled.")
+                return
+
+        mode_desc = " (resuming previous conversation)" if "-c" in extra_args else ""
+        print(f"\nLaunching profile '{profile.alias}'{mode_desc}...")
         self.registry.touch_last_used(profile.alias)
         try:
             ret = self.runner.run_interactive(profile, extra_args=extra_args)
-            print(f"\nProfile session '{profile.alias}' ended (exit code: {ret}).")
+            print(f"\n[ags] Profile session '{profile.alias}' ended (exit code: {ret}).")
         except Exception as e:
-            print(f"Failed to launch profile session: {e}")
+            print(f"\n[ags] Failed to launch profile session: {e}")
+
+        try:
+            input("\nPress Enter to return to menu...")
+        except (EOFError, KeyboardInterrupt):
+            pass
