@@ -15,7 +15,7 @@ from .isolation import IsolationRunner
 from .menu import TerminalMenu
 
 
-DEFAULT_BASE_DIR = os.environ.get("AGS_HOME", "/var/lib/agyswitch")
+DEFAULT_BASE_DIR = os.environ.get("AGS_HOME", os.path.expanduser("~/.agyswitch"))
 
 
 def get_registry(base_dir: Optional[str] = None) -> ProfileRegistry:
@@ -29,21 +29,24 @@ def cmd_list(args, registry: ProfileRegistry):
         print("No profiles configured yet. Add one using: ags add <alias>")
         return 0
 
-    print(f"{'ALIAS':<18} {'STABLE ID':<18} {'LAST USED':<20} {'CREATED':<20}")
-    print("-" * 76)
+    print(f"{'ALIAS':<18} {'PROFILE ID':<20} {'STATUS':<20} {'LAST USED':<20} {'CREATED':<20}")
+    print("-" * 98)
     for p in profiles:
+        status = registry.get_auth_status(p)
         last_used = p.last_used_at[:16].replace("T", " ") if p.last_used_at else "Never"
         created = p.created_at[:16].replace("T", " ")
-        print(f"{p.alias:<18} {p.id:<18} {last_used:<20} {created:<20}")
+        print(f"{p.alias:<18} {p.id:<20} {status:<20} {last_used:<20} {created:<20}")
     return 0
 
 
 def cmd_add(args, registry: ProfileRegistry):
     try:
         profile = registry.add_profile(args.alias)
+        status = registry.get_auth_status(profile)
         print(f"Profile '{profile.alias}' successfully added.")
-        print(f"  Stable ID: {profile.id}")
-        print(f"  Home Path: {profile.home_dir}")
+        print(f"  Profile ID: {profile.id}")
+        print(f"  Home Path:  {profile.home_dir}")
+        print(f"  Status:     {status}")
         print(f"\nTo authenticate this profile, run:\n  ags run {profile.alias}")
         return 0
     except (InvalidAliasError, ProfileAlreadyExistsError) as e:
@@ -55,8 +58,8 @@ def cmd_rename(args, registry: ProfileRegistry):
     try:
         profile = registry.rename_profile(args.old_alias, args.new_alias)
         print(f"Profile renamed: '{args.old_alias}' -> '{profile.alias}'")
-        print(f"  Stable ID: {profile.id} (unchanged)")
-        print(f"  Home Path: {profile.home_dir} (unchanged)")
+        print(f"  Profile ID: {profile.id} (unchanged)")
+        print(f"  Home Path:  {profile.home_dir} (unchanged)")
         print("All credentials, history, and conversations remain intact.")
         return 0
     except (ProfileNotFoundError, InvalidAliasError, ProfileAlreadyExistsError) as e:
@@ -66,16 +69,34 @@ def cmd_rename(args, registry: ProfileRegistry):
 
 def cmd_remove(args, registry: ProfileRegistry):
     try:
+        profile = registry.get_by_alias(args.alias)
+        if not profile:
+            print(f"Error: Profile '{args.alias}' not found.", file=sys.stderr)
+            return 1
+
+        active_pids = registry.get_active_sessions(profile)
+        if active_pids and not args.force:
+            print(
+                f"Error: Profile '{args.alias}' has active running session(s) (PID: {', '.join(map(str, active_pids))}).",
+                file=sys.stderr
+            )
+            print("Please close active sessions before removing, or use -f/--force to proceed.", file=sys.stderr)
+            return 1
+
         if not args.force:
-            confirm = input(f"Are you sure you want to remove profile '{args.alias}'? [y/N]: ").strip().lower()
+            print(f"WARNING: Deleting profile '{profile.alias}' will permanently remove all isolated")
+            print(f"         authentication tokens, configuration, and conversation history.")
+            print(f"         Target directory: {profile.home_dir}")
+            print(f"         This action cannot be undone.")
+            confirm = input(f"Are you sure you want to permanently remove '{profile.alias}'? [y/N]: ").strip().lower()
             if confirm not in ("y", "yes"):
                 print("Operation cancelled.")
                 return 0
 
-        profile = registry.remove_profile(args.alias, purge_files=not args.keep_data)
-        print(f"Profile '{profile.alias}' (ID: {profile.id}) removed.")
+        profile = registry.remove_profile(args.alias, purge_files=not args.keep_data, force=args.force)
+        print(f"Profile '{profile.alias}' (ID: {profile.id}) successfully removed.")
         return 0
-    except (ProfileNotFoundError, InvalidAliasError) as e:
+    except (ProfileNotFoundError, InvalidAliasError, RegistryError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
@@ -93,8 +114,15 @@ def cmd_run(args, registry: ProfileRegistry):
     extra_args = []
     if args.continue_session:
         extra_args.append("-c")
-    if args.agy_args:
-        extra_args.extend(args.agy_args)
+
+    if getattr(args, "agy_args", None):
+        # Filter out stray bare '--' delimiters if present
+        for arg in args.agy_args:
+            if arg == "--":
+                continue
+            if arg in ("-c", "--continue") and "-c" in extra_args:
+                continue
+            extra_args.append(arg)
 
     try:
         return runner.run_interactive(

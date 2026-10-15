@@ -19,6 +19,9 @@ RESERVED_ALIASES = {
 ALIAS_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 
+DEFAULT_BASE_DIR = os.environ.get("AGS_HOME", os.path.expanduser("~/.agyswitch"))
+
+
 class RegistryError(Exception):
     """Base error for registry operations."""
     pass
@@ -120,7 +123,16 @@ class ProfileRegistry:
         self.load()
 
     def _ensure_base_dirs(self):
+        os.makedirs(self.base_dir, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(self.base_dir, 0o700)
+        except OSError:
+            pass
         os.makedirs(self.profiles_dir, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(self.profiles_dir, 0o700)
+        except OSError:
+            pass
 
     def load(self):
         """Load registry from JSON file if it exists."""
@@ -243,22 +255,87 @@ class ProfileRegistry:
         self.save()
         return profile
 
-    def remove_profile(self, alias: str, purge_files: bool = True) -> Profile:
+    def get_auth_status(self, profile: Profile) -> str:
+        """
+        Safely check if the profile has valid authentication state.
+        Never reads, parses, or exposes token contents.
+        Enforces 0600 on credential file if found.
+        """
+        token_path = os.path.join(profile.home_dir, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+        if os.path.isfile(token_path):
+            try:
+                st = os.stat(token_path)
+                mode = oct(st.st_mode)[-3:]
+                if mode != "600":
+                    os.chmod(token_path, 0o600)
+                if st.st_size > 0:
+                    return "Authenticated"
+            except OSError:
+                pass
+        return "Not Authenticated"
+
+    def get_active_sessions(self, profile: Profile) -> List[int]:
+        """Check /proc to find any processes running with HOME set to profile's home directory."""
+        active_pids = []
+        home_target = os.path.realpath(profile.home_dir)
+        proc_dir = "/proc"
+        if not os.path.isdir(proc_dir):
+            return active_pids
+
+        for entry in os.listdir(proc_dir):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            environ_path = os.path.join(proc_dir, entry, "environ")
+            try:
+                with open(environ_path, "rb") as f:
+                    content = f.read(8192)
+                    target_bytes = f"HOME={home_target}".encode("utf-8")
+                    if target_bytes in content.split(b"\x00"):
+                        active_pids.append(pid)
+            except (OSError, PermissionError):
+                continue
+        return sorted(active_pids)
+
+    def remove_profile(self, alias: str, purge_files: bool = True, force: bool = False) -> Profile:
         """
         Remove a profile from the registry.
         If purge_files is True, deletes the profile's dedicated home directory.
+        Protects against deleting directories outside self.profiles_dir.
+        Checks for active sessions unless force=True.
         """
         norm_alias = validate_alias(alias)
         profile = self.get_by_alias(norm_alias)
         if not profile:
             raise ProfileNotFoundError(f"Profile '{alias}' not found.")
 
+        # Safety boundary checks
+        clean_home = os.path.realpath(profile.home_dir)
+        clean_profiles_dir = os.path.realpath(self.profiles_dir)
+
+        if not clean_home.startswith(clean_profiles_dir + os.sep):
+            raise RegistryError(
+                f"Safety violation: profile home directory '{clean_home}' is not inside profiles directory '{clean_profiles_dir}'."
+            )
+
+        protected_dirs = {"/", "/root", "/home", "/var", "/usr", "/etc", "/tmp"}
+        if clean_home in protected_dirs:
+            raise RegistryError(f"Safety violation: attempted to remove protected system directory '{clean_home}'.")
+
+        # Check active sessions
+        active_pids = self.get_active_sessions(profile)
+        if active_pids and not force:
+            raise RegistryError(
+                f"Cannot remove profile '{alias}': active session(s) detected (PID: {', '.join(map(str, active_pids))}). "
+                "Terminate running session(s) or use --force."
+            )
+
         del self.profiles[profile.id]
         self.save()
 
-        if purge_files and os.path.exists(profile.home_dir):
+        if purge_files and os.path.exists(clean_home):
             import shutil
-            shutil.rmtree(profile.home_dir, ignore_errors=True)
+            shutil.rmtree(clean_home, ignore_errors=True)
 
         return profile
 
@@ -269,3 +346,4 @@ class ProfileRegistry:
             profile.last_used_at = datetime.now(timezone.utc).isoformat()
             self.save()
         return profile
+

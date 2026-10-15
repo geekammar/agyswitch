@@ -30,7 +30,8 @@ class TerminalMenu:
                 print(" Available Profiles:")
                 for idx, p in enumerate(profiles, start=1):
                     last_used = p.last_used_at[:16].replace("T", " ") if p.last_used_at else "Never"
-                    print(f"  [{idx:2d}] {p.alias:<16} (ID: {p.id}, Last used: {last_used})")
+                    status = self.registry.get_auth_status(p)
+                    print(f"  [{idx:2d}] {p.alias:<16} (ID: {p.id}, Status: {status}, Last used: {last_used})")
                 print()
 
             print(" Actions:")

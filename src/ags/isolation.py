@@ -15,8 +15,9 @@ from .core import Profile
 
 
 DEFAULT_AGY_PATHS = [
-    "/usr/local/bin/agy",
+    os.path.expanduser("~/.local/bin/agy"),
     "/root/.local/bin/agy",
+    "/usr/local/bin/agy",
     "/usr/bin/agy"
 ]
 
@@ -92,8 +93,18 @@ class IsolationRunner:
         extra_args = extra_args or []
         env = os.environ.copy()
 
-        # Set profile HOME
+        # Set profile HOME and XDG variables
         env["HOME"] = profile.home_dir
+        env["XDG_CONFIG_HOME"] = os.path.join(profile.home_dir, ".config")
+        env["XDG_DATA_HOME"] = os.path.join(profile.home_dir, ".local", "share")
+        env["XDG_CACHE_HOME"] = os.path.join(profile.home_dir, ".cache")
+        env["XDG_STATE_HOME"] = os.path.join(profile.home_dir, ".local", "state")
+
+        for d in [env["XDG_CONFIG_HOME"], env["XDG_DATA_HOME"], env["XDG_CACHE_HOME"], env["XDG_STATE_HOME"]]:
+            os.makedirs(d, mode=0o700, exist_ok=True)
+
+        # Clear inherited session bus so a fresh isolated bus is generated
+        env.pop("DBUS_SESSION_BUS_ADDRESS", None)
 
         # Base execution command
         agy_cmd = [self.agy_binary] + extra_args
