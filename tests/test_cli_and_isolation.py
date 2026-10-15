@@ -84,10 +84,18 @@ class TestCliAndIsolation(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("mode 0700", reason)
 
-        # Root user or non-root path
+        # Root user or non-root path that exists
         allowed, reason = check_workspace_traversal(self.test_dir, target_user="ags_prof_123")
         self.assertTrue(allowed)
         self.assertIsNone(reason)
+
+        # Path outside /root that does not exist
+        missing_path = os.path.join(self.test_dir, "nonexistent_subpath")
+        allowed, reason = check_workspace_traversal(missing_path, target_user="ags_prof_123")
+        self.assertFalse(allowed)
+        self.assertIn("Workspace path does not exist", reason)
+
+
 
 
 if __name__ == "__main__":

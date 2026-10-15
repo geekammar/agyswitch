@@ -54,8 +54,6 @@ def check_workspace_traversal(workspace_path: str, target_user: Optional[str] = 
     Specifically checks if path is inside a restricted directory (e.g. /root with 0700).
     """
     abs_path = os.path.abspath(workspace_path)
-    if not os.path.exists(abs_path):
-        return False, f"Workspace path does not exist: {abs_path}"
 
     # If target_user is unprivileged and path starts with /root
     if target_user and target_user != "root":
@@ -67,7 +65,11 @@ def check_workspace_traversal(workspace_path: str, target_user: Optional[str] = 
                 "or adjust workspace permissions."
             )
 
+    if not os.path.exists(abs_path):
+        return False, f"Workspace path does not exist: {abs_path}"
+
     return True, None
+
 
 
 class IsolationRunner:
