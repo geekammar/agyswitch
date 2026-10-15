@@ -159,8 +159,10 @@ graph TD
 
 1. **Transient D-Bus Session**:
    Every invocation is wrapped with `dbus-run-session --`. This creates a temporary Unix domain socket bus per process tree, preventing cross-profile D-Bus and Secret Service contamination.
-2. **Dedicated System Users (Optional Strict Mode)**:
-   When enabled, `runuser -u ags_prof_<id> --` enforces Linux kernel-level UID separation, disallowing file reads, process inspection, or network socket snooping across profiles.
+2. **Application-State Isolation Boundary**:
+   In Phase 01, isolation operates at the application-state and credential-storage boundary (`$HOME`, `$XDG_*`, private D-Bus bus, 0700/0600 permissions). Because processes currently execute under the same Linux user ID (root), this provides robust multi-account state separation, but is **not** a complete OS-level security boundary against hostile or compromised processes running under the same root UID.
+3. **Dedicated System Users (Phase 02 Architecture)**:
+   When enabled in Phase 02, `runuser -u ags_prof_<id> --` enforces Linux kernel-level UID separation, disallowing file reads, process inspection, or network socket snooping across profiles.
 
 ---
 
@@ -185,19 +187,25 @@ If workspaces reside inside `/root` (mode `0700`), unprivileged profile users ca
    Atomic file writes (`tempfile.NamedTemporaryFile` + `os.replace`) ensure `registry.json` is never half-written. If corrupted by external tools, `ags` fails cleanly with a descriptive diagnostic message rather than crashing unhandled.
 3. **Missing Profile Directory**:
    If a profile directory is manually deleted from disk, `ags` recreates the home directory with `0700` upon next access or warns before execution.
+4. **Concurrent Session Database Safeguard**:
+   AGY writes conversation history to SQLite databases (`conversation_summaries.db`, `conversations/*.db`) and maintains presence locks (`presence/*.lock`). Running multiple concurrent AGY processes under the same profile causes lock contention and state desynchronization. `ags run` detects active sessions via `/proc` environment tracking, prompting interactive users and blocking unattended executions unless `-f` / `--allow-concurrent` is provided.
 
 ---
 
 ## 9. CLI Commands & Numbered Menu UX
 
 ### 9.1 CLI Command Reference
+- `ags`: Launch interactive numbered menu (default).
 - `ags add <alias>`: Add a new profile.
-- `ags list` (or `ags ls`): List configured profiles, IDs, last used dates.
-- `ags rename <old-alias> <new-alias>` (or `ags mv`): Rename alias.
+- `ags list` (or `ags ls`): List configured profiles, IDs, bound accounts, and auth statuses.
+- `ags rename <old-alias> <new-alias>` (or `ags mv`): Rename alias while preserving all state.
 - `ags run <alias>`: Launch interactive AGY session for profile.
 - `ags run <alias> -c`: Continue the most recent conversation.
+- `ags run <alias> -f` (or `--allow-concurrent`): Override concurrent session warning.
 - `ags run <alias> [args...]`: Forward extra flags (e.g. `--model`, `--agent`).
-- `ags remove <alias>` (or `ags rm`): Delete profile.
+- `ags remove <alias>` (or `ags rm`): Delete profile (with active session check).
+- `ags remove <alias> -f`: Force delete without confirmation.
+- `ags remove <alias> --keep-data`: Remove profile from registry but keep files on disk.
 - `ags menu`: Launch interactive numbered menu.
 
 ### 9.2 Numbered Menu (Android/Termius Optimized)
@@ -205,3 +213,4 @@ Designed specifically for mobile SSH connections with virtual keyboards:
 - Clean linear scrolling (no full-screen curses cursor flickers).
 - Direct single-number inputs (`1`, `2`, `3` to launch).
 - Short single-letter shortcuts (`a` for add, `c` for continue, `m` for rename, `d` for delete, `q` for quit).
+- Active session warnings when selecting a running profile.

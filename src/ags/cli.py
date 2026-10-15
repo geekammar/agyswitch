@@ -29,19 +29,17 @@ def cmd_list(args, registry: ProfileRegistry):
         print("No profiles configured yet. Add one using: ags add <alias>")
         return 0
 
-    print(f"{'ALIAS':<16} {'PROFILE ID':<20} {'ACCOUNT / STATUS':<30} {'LAST USED':<18} {'CREATED':<18}")
-    print("-" * 104)
+    print(f"{'ALIAS':<16} {'PROFILE ID':<20} {'ACCOUNT':<28} {'AUTH STATUS':<26} {'LAST USED':<18}")
+    print("-" * 110)
     warnings = []
     for p in profiles:
-        account = registry.get_auth_account(p)
-        warning = registry.check_eligibility_warning(p)
-        status_display = account
-        if warning:
-            status_display += " [!]"
-            warnings.append((p.alias, warning))
+        summary = registry.get_auth_summary(p)
+        account = summary["account"] or "(none)"
+        status_display = summary["status"]
+        if summary["eligibility_warning"]:
+            warnings.append((p.alias, summary["eligibility_warning"]))
         last_used = p.last_used_at[:16].replace("T", " ") if p.last_used_at else "Never"
-        created = p.created_at[:16].replace("T", " ")
-        print(f"{p.alias:<16} {p.id:<20} {status_display:<30} {last_used:<18} {created:<18}")
+        print(f"{p.alias:<16} {p.id:<20} {account:<28} {status_display:<26} {last_used:<18}")
 
     if warnings:
         print("\nAccount Notices:")
@@ -53,11 +51,11 @@ def cmd_list(args, registry: ProfileRegistry):
 def cmd_add(args, registry: ProfileRegistry):
     try:
         profile = registry.add_profile(args.alias)
-        status = registry.get_auth_account(profile)
+        summary = registry.get_auth_summary(profile)
         print(f"Profile '{profile.alias}' successfully added.")
         print(f"  Profile ID: {profile.id}")
         print(f"  Home Path:  {profile.home_dir}")
-        print(f"  Status:     {status}")
+        print(f"  Status:     {summary['status']}")
         print(f"\nTo authenticate this profile, run:\n  ags run {profile.alias}")
         return 0
     except (InvalidAliasError, ProfileAlreadyExistsError) as e:
@@ -118,13 +116,28 @@ def cmd_run(args, registry: ProfileRegistry):
         print(f"Error: Profile '{args.alias}' not found.", file=sys.stderr)
         return 1
 
-    # Check for active running sessions
+    # Check for active running sessions (safeguard against concurrent database access)
     active_pids = registry.get_active_sessions(profile)
-    if active_pids:
+    if active_pids and not getattr(args, "allow_concurrent", False):
+        pid_list = ", ".join(map(str, active_pids))
         print(
-            f"Notice: Profile '{profile.alias}' currently has active session(s) (PID: {', '.join(map(str, active_pids))}).",
+            f"Warning: Profile '{profile.alias}' currently has active session(s) (PID: {pid_list}).\n"
+            "         Running concurrent sessions on the same profile risks database lock contention\n"
+            "         and conversation corruption in conversation_summaries.db.",
             file=sys.stderr
         )
+        if sys.stdin.isatty():
+            try:
+                confirm = input("Do you want to proceed with concurrent session anyway? [y/N]: ").strip().lower()
+                if confirm not in ("y", "yes"):
+                    print("Aborted concurrent session launch.")
+                    return 1
+            except (EOFError, KeyboardInterrupt):
+                print("\nCancelled.")
+                return 1
+        else:
+            print("Error: Blocked concurrent execution. Use -f / --allow-concurrent to override.", file=sys.stderr)
+            return 1
 
     # Check for known Google backend eligibility warning
     warning = registry.check_eligibility_warning(profile)
@@ -198,6 +211,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = subparsers.add_parser("run", help="Launch an AGY session for a profile")
     p_run.add_argument("-c", "--continue", dest="continue_session", action="store_true",
                        help="Continue the most recent conversation")
+    p_run.add_argument("-f", "--force", "--allow-concurrent", dest="allow_concurrent", action="store_true",
+                       help="Allow running concurrent session even if profile is already active")
     p_run.add_argument("--unprivileged", action="store_true", help="Execute as dedicated unprivileged user")
     p_run.add_argument("alias", help="Profile alias to run")
 

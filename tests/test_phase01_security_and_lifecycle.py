@@ -249,6 +249,168 @@ class TestPhase01SecurityAndLifecycle(unittest.TestCase):
         self.assertIsNotNone(warning)
         self.assertIn("Google backend verification required", warning)
 
+    def test_11_auth_summary_distinctions(self):
+        """
+        Verify get_auth_summary correctly distinguishes:
+        - Not Authenticated (no token file)
+        - Credentials Stored (token file exists, but unverified)
+        - Confirmed Working (token + session log confirming successful backend oauth)
+        - Verification Required [!] (token + eligibility warning in log)
+        """
+        import base64
+
+        # 1. Fresh profile without credentials
+        prof_fresh = self.registry.add_profile("fresh-user")
+        summary_fresh = self.registry.get_auth_summary(prof_fresh)
+        self.assertFalse(summary_fresh["has_credentials"])
+        self.assertIsNone(summary_fresh["account"])
+        self.assertFalse(summary_fresh["confirmed_working"])
+        self.assertEqual(summary_fresh["status"], "Not Authenticated")
+
+        # Helper to write token
+        def create_token(prof, email):
+            tdir = os.path.join(prof.home_dir, ".gemini", "antigravity-cli")
+            os.makedirs(tdir, mode=0o700, exist_ok=True)
+            payload = json.dumps({"email": email, "sub": "987654"}).encode("utf-8")
+            b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+            with open(os.path.join(tdir, "antigravity-oauth-token"), "w") as f:
+                json.dump({"token": "sec", "id_token": f"a.{b64}.c"}, f)
+
+        # 2. Profile with stored token but no session run yet
+        prof_stored = self.registry.add_profile("stored-user")
+        create_token(prof_stored, "stored@gmail.com")
+        summary_stored = self.registry.get_auth_summary(prof_stored)
+        self.assertTrue(summary_stored["has_credentials"])
+        self.assertEqual(summary_stored["account"], "stored@gmail.com")
+        self.assertFalse(summary_stored["confirmed_working"])
+        self.assertEqual(summary_stored["status"], "Credentials Stored")
+
+        # 3. Profile with confirmed working session
+        prof_working = self.registry.add_profile("working-user")
+        create_token(prof_working, "working@gmail.com")
+        log_dir = os.path.join(prof_working.home_dir, ".gemini", "antigravity-cli", "log")
+        os.makedirs(log_dir, mode=0o700, exist_ok=True)
+        with open(os.path.join(log_dir, "cli-20261015_200000.log"), "w") as f:
+            f.write("server_oauth.go:209] OAuth: authenticated successfully as working@gmail.com\n"
+                    "Propagating selected model override to backend\n")
+        summary_working = self.registry.get_auth_summary(prof_working)
+        self.assertTrue(summary_working["has_credentials"])
+        self.assertEqual(summary_working["account"], "working@gmail.com")
+        self.assertTrue(summary_working["confirmed_working"])
+        self.assertEqual(summary_working["status"], "Confirmed Working")
+
+        # 4. Profile with eligibility error (upstream issue #785)
+        prof_blocked = self.registry.add_profile("blocked-user")
+        create_token(prof_blocked, "blocked@gmail.com")
+        b_log_dir = os.path.join(prof_blocked.home_dir, ".gemini", "antigravity-cli", "log")
+        os.makedirs(b_log_dir, mode=0o700, exist_ok=True)
+        with open(os.path.join(b_log_dir, "cli-20261015_200000.log"), "w") as f:
+            f.write("OAuth: authenticated successfully as blocked@gmail.com\n"
+                    "PERMISSION_DENIED: VALIDATION_REQUIRED\n"
+                    "Eligibility check failed\n")
+        summary_blocked = self.registry.get_auth_summary(prof_blocked)
+        self.assertTrue(summary_blocked["has_credentials"])
+        self.assertEqual(summary_blocked["account"], "blocked@gmail.com")
+        self.assertFalse(summary_blocked["confirmed_working"])
+        self.assertEqual(summary_blocked["status"], "Verification Required [!]")
+        self.assertIsNotNone(summary_blocked["eligibility_warning"])
+
+    def test_12_concurrent_session_safeguard(self):
+        """
+        Verify CLI cmd_run prevents accidental concurrent database access:
+        - Blocks non-interactive execution when active session exists
+        - Allows override with --allow-concurrent or -f
+        - Interactively prompts for confirmation if stdin is a tty
+        """
+        prof = self.registry.add_profile("concur-test")
+
+        # Simulate active session detected
+        with patch.object(ProfileRegistry, "get_active_sessions", return_value=[12345]):
+            with patch("sys.stdin.isatty", return_value=False):
+                # Non-interactive without force must fail (exit 1)
+                ret = main(["--base-dir", self.test_dir, "run", "concur-test"])
+                self.assertEqual(ret, 1)
+
+            # With --allow-concurrent, must proceed to runner (mock runner.run_interactive)
+            with patch("ags.isolation.IsolationRunner.run_interactive", return_value=0) as mock_run:
+                ret = main(["--base-dir", self.test_dir, "run", "concur-test", "--allow-concurrent"])
+                self.assertEqual(ret, 0)
+                mock_run.assert_called_once()
+
+            # With -f, must proceed to runner
+            with patch("ags.isolation.IsolationRunner.run_interactive", return_value=0) as mock_run_f:
+                ret = main(["--base-dir", self.test_dir, "run", "concur-test", "-f"])
+                self.assertEqual(ret, 0)
+                mock_run_f.assert_called_once()
+
+            # Interactive rejection ('n')
+            with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="n"):
+                ret = main(["--base-dir", self.test_dir, "run", "concur-test"])
+                self.assertEqual(ret, 1)
+
+            # Interactive confirmation ('y')
+            with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="y"), \
+                 patch("ags.isolation.IsolationRunner.run_interactive", return_value=0) as mock_interactive:
+                ret = main(["--base-dir", self.test_dir, "run", "concur-test"])
+                self.assertEqual(ret, 0)
+                mock_interactive.assert_called_once()
+
+    def test_13_conversation_storage_separation_and_resumption(self):
+        """
+        Verify that conversation databases remain strictly isolated between profiles,
+        and that renaming a profile preserves all conversation databases and state.
+        """
+        prof_x = self.registry.add_profile("conv-x")
+        prof_y = self.registry.add_profile("conv-y")
+
+        # Write separate SQLite mock DBs in conversation folders
+        conv_dir_x = os.path.join(prof_x.home_dir, ".gemini", "antigravity-cli", "conversations")
+        conv_dir_y = os.path.join(prof_y.home_dir, ".gemini", "antigravity-cli", "conversations")
+        os.makedirs(conv_dir_x, exist_ok=True)
+        os.makedirs(conv_dir_y, exist_ok=True)
+
+        db_x = os.path.join(conv_dir_x, "conv-x-id.db")
+        db_y = os.path.join(conv_dir_y, "conv-y-id.db")
+        with open(db_x, "w") as f:
+            f.write("sqlite-data-for-x")
+        with open(db_y, "w") as f:
+            f.write("sqlite-data-for-y")
+
+        # Verify separation
+        self.assertTrue(os.path.exists(db_x))
+        self.assertTrue(os.path.exists(db_y))
+        self.assertFalse(os.path.exists(os.path.join(conv_dir_x, "conv-y-id.db")))
+        self.assertFalse(os.path.exists(os.path.join(conv_dir_y, "conv-x-id.db")))
+
+        # Rename prof_x -> conv-renamed
+        self.registry.rename_profile("conv-x", "conv-renamed")
+        renamed_prof = self.registry.get_by_alias("conv-renamed")
+        renamed_conv_path = os.path.join(renamed_prof.home_dir, ".gemini", "antigravity-cli", "conversations", "conv-x-id.db")
+        self.assertTrue(os.path.exists(renamed_conv_path))
+        with open(renamed_conv_path, "r") as f:
+            self.assertEqual(f.read(), "sqlite-data-for-x")
+
+    def test_14_restart_behavior_and_persistence(self):
+        """
+        Verify that all profile state, timestamps, IDs, and paths persist identically
+        across simulated process restarts and registry re-instantiations.
+        """
+        prof = self.registry.add_profile("persist-test")
+        orig_id = prof.id
+        orig_created = prof.created_at
+        self.registry.touch_last_used("persist-test")
+        orig_used = self.registry.get_by_alias("persist-test").last_used_at
+
+        # Simulate complete restart by instantiating new ProfileRegistry instance
+        restarted_registry = ProfileRegistry(base_dir=self.test_dir)
+        restarted_prof = restarted_registry.get_by_alias("persist-test")
+
+        self.assertIsNotNone(restarted_prof)
+        self.assertEqual(restarted_prof.id, orig_id)
+        self.assertEqual(restarted_prof.created_at, orig_created)
+        self.assertEqual(restarted_prof.last_used_at, orig_used)
+        self.assertEqual(restarted_prof.home_dir, prof.home_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

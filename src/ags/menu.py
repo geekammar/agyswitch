@@ -30,11 +30,10 @@ class TerminalMenu:
                 print(" Available Profiles:")
                 for idx, p in enumerate(profiles, start=1):
                     last_used = p.last_used_at[:16].replace("T", " ") if p.last_used_at else "Never"
-                    status = self.registry.get_auth_account(p)
-                    warn = self.registry.check_eligibility_warning(p)
-                    if warn:
-                        status += " [!]"
-                    print(f"  [{idx:2d}] {p.alias:<16} (ID: {p.id}, Account: {status}, Last used: {last_used})")
+                    summary = self.registry.get_auth_summary(p)
+                    acct = summary["account"] or "(none)"
+                    status = summary["status"]
+                    print(f"  [{idx:2d}] {p.alias:<16} (ID: {p.id}, Account: {acct}, Status: {status}, Last used: {last_used})")
                 print()
 
             print(" Actions:")
@@ -165,6 +164,16 @@ class TerminalMenu:
             print("\nCancelled.")
 
     def _launch_profile(self, profile: Profile, extra_args: list):
+        active_pids = self.registry.get_active_sessions(profile)
+        if active_pids:
+            pid_list = ", ".join(map(str, active_pids))
+            print(f"\nWarning: Profile '{profile.alias}' already has active session(s) (PID: {pid_list}).")
+            print("Running concurrent sessions on the same profile risks database lock contention.")
+            confirm = input("Proceed anyway? [y/N]: ").strip().lower()
+            if confirm not in ("y", "yes"):
+                print("Cancelled.")
+                return
+
         print(f"\nLaunching profile '{profile.alias}'...")
         self.registry.touch_last_used(profile.alias)
         try:

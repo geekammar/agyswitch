@@ -339,6 +339,73 @@ class ProfileRegistry:
             pass
         return None
 
+    def has_confirmed_session(self, profile: Profile) -> bool:
+        """
+        Check whether this profile has a session log confirming successful OAuth
+        authentication and backend communication without blocking eligibility errors.
+        Does NOT read or expose tokens.
+        """
+        log_dir = os.path.join(profile.home_dir, ".gemini", "antigravity-cli", "log")
+        if not os.path.isdir(log_dir):
+            return False
+
+        try:
+            log_files = sorted(
+                [os.path.join(log_dir, f) for f in os.listdir(log_dir) if f.startswith("cli-") and f.endswith(".log")],
+                key=os.path.getmtime,
+                reverse=True
+            )
+            if not log_files:
+                return False
+
+            latest_log = log_files[0]
+            with open(latest_log, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                # Check for blocking eligibility error
+                if "VALIDATION_REQUIRED" in content or "Eligibility check failed" in content:
+                    return False
+                if "authenticated successfully" in content or "Propagating selected model override to backend" in content:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def get_auth_summary(self, profile: Profile) -> dict:
+        """
+        Safely inspect and distinguish:
+        1. Locally stored credentials (token file exists with non-zero size, mode 0600)
+        2. Identified Google account (email extracted from non-secret id_token payload)
+        3. Confirmed working authentication (verified via successful live session log)
+        4. Known Google backend eligibility errors (Upstream Issue #785)
+        Does NOT treat token existence or unverified decoded JWT as proof of valid auth.
+        """
+        has_credentials = (self.get_auth_status(profile) == "Authenticated")
+        account_email = None
+        if has_credentials:
+            raw_account = self.get_auth_account(profile)
+            if raw_account and raw_account not in ("Authenticated", "Not Authenticated"):
+                account_email = raw_account
+
+        warning = self.check_eligibility_warning(profile)
+        confirmed_working = has_credentials and self.has_confirmed_session(profile)
+
+        if not has_credentials:
+            status = "Not Authenticated"
+        elif warning:
+            status = "Verification Required [!]"
+        elif confirmed_working:
+            status = "Confirmed Working"
+        else:
+            status = "Credentials Stored"
+
+        return {
+            "has_credentials": has_credentials,
+            "account": account_email,
+            "confirmed_working": confirmed_working,
+            "eligibility_warning": warning,
+            "status": status
+        }
+
     def get_active_sessions(self, profile: Profile) -> List[int]:
         """Check /proc to find any processes running with HOME set to profile's home directory."""
         active_pids = []
